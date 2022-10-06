@@ -1,11 +1,19 @@
 import model 
 import torch 
+import torch.distributed as dist
+import os 
 
-torch.backends.cudnn.benchmark = True
+
+torch.backends.cudnn.benchmark = False
+use_pytorch_ddp = 'LOCAL_RANK' in os.environ
+rank = int(os.environ['LOCAL_RANK']) if use_pytorch_ddp else 0
+device = torch.device(f'cuda:{rank}' if torch.cuda.is_available() else 'cpu')
+n_gpus = torch.cuda.device_count()
+torch.cuda.set_device(rank)
+if use_pytorch_ddp:
+    dist.init_process_group('nccl')
 L = 320000
 EX_PER_DEVICE = 32
-
-batch_size = torch.cuda.device_count() * EX_PER_DEVICE
 
 # Initialize
 m = model.ConformerEncoderDecoder(model.ConformerConfig())
@@ -14,8 +22,12 @@ pad = torch.zeros_like(wav)
 _ = m(wav, pad)
 
 # Move to cuda 
-# m = torch.nn.parallel.DistributedDataParallel(m.cuda()).train()
-m = torch.nn.DataParallel(m.cuda()).train()
+if use_pytorch_ddp:
+    m = torch.nn.parallel.DistributedDataParallel(m.cuda(rank),device_ids=[rank], output_device=rank).train()
+    batch_size = EX_PER_DEVICE
+else:
+    m = torch.nn.DataParallel(m.cuda()).train()
+    batch_size = EX_PER_DEVICE * n_gpus
 opt = torch.optim.Adam(m.parameters())
 
 def train_step():
@@ -23,7 +35,7 @@ def train_step():
     inp = torch.randn(size=(batch_size, L))
     pad = torch.zeros_like(inp)
     logits, logit_paddings = m(inp, pad)
-    targets = torch.randint(low=1, high=1024, size=(logits.shape[0],256))
+    targets = torch.randint(low=0, high=1024, size=(logits.shape[0],256))
     target_paddings = torch.zeros_like(targets)
     logprobs = torch.log_softmax(logits, dim=-1, dtype=torch.float32)
     input_lengths = torch.einsum('bh->b', 1 - logit_paddings).long()
@@ -35,9 +47,13 @@ def train_step():
         target_lengths)
     loss.backward()
     opt.step()
-    print(loss.sum())
+    return loss.sum().item()
+
 
 # 10 step of training
 for i in range(10):
-    print("Memory allocated: ",torch.cuda.memory_allocated()/1024**3,"GB")
-    train_step()
+    if rank==0:
+        print(f"Memory allocated: ",torch.cuda.memory_allocated()/1024**3,"GB")
+    loss = train_step()
+    if rank==0:
+        print(f"{loss}")
