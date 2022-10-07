@@ -181,6 +181,7 @@ class Conv2dSubsampling(nn.Module):
                                stride=self.filter_stride[:1])
         out_padding = out_padding.squeeze(dim=1)
         outputs = outputs * (1 - out_padding[:, None, :, None])
+        # outputs = outputs.masked_fill(out_padding[:, None, :, None]==1,0)
         return outputs, out_padding
 
 
@@ -563,54 +564,73 @@ class CustomBatchNorm1d(nn.BatchNorm1d):
         )
 
 
-class BatchNorm(nn.Module):
-    def __init__(self, config: ConformerConfig):
-        super().__init__()
-        self.bn = CustomBatchNorm1d(config)
-
-    def forward(self, inputs, input_paddings):
-        #inputs: NHD
-        #padding: NH
-        bn_inp = self.bn(inputs[input_paddings >= 0])
-        output = torch.zeros_like(inputs)
-        output[input_paddings >= 0] = bn_inp
-
-        return output
-
 # class BatchNorm(nn.Module):
 #     def __init__(self, config: ConformerConfig):
 #         super().__init__()
-#         # self.bn = CustomBatchNorm1d(config)
-#         running_mean = torch.zeros(config.encoder_dim)
-#         running_var = torch.zeros(config.encoder_dim)
-#         self.register_buffer("running_mean", running_mean)
-#         self.register_buffer("running_var",running_var)
-#         self.weight = nn.Parameter(torch.zeros(config.encoder_dim))
-#         self.bias = nn.Parameter(torch.zeros(config.encoder_dim))
-#         self.momentum = config.batch_norm_momentum
-#         self.epsilon = config.batch_norm_epsilon
-#         self.dim = config.encoder_dim
-    
+#         self.bn = CustomBatchNorm1d(config)
+
 #     def forward(self, inputs, input_paddings):
 #         #inputs: NHD
 #         #padding: NH
-#         mask = 1-input_paddings[:,:,None]
+#         bn_inp = self.bn(inputs[input_paddings == 0])
+#         output = torch.zeros_like(inputs)
+#         output[input_paddings == 0] = bn_inp
+
+#         return output
+
+class BatchNorm(nn.Module):
+    def __init__(self, config: ConformerConfig):
+        super().__init__()
+        running_mean = torch.zeros(config.encoder_dim)
+        running_var = torch.zeros(config.encoder_dim)
+        self.register_buffer("running_mean", running_mean)
+        self.register_buffer("running_var",running_var)
+        self.weight = nn.Parameter(torch.zeros(config.encoder_dim))
+        self.bias = nn.Parameter(torch.zeros(config.encoder_dim))
+        self.register_buffer("momentum", torch.FloatTensor([config.batch_norm_momentum]))
+        self.register_buffer("epsilon", torch.FloatTensor([config.batch_norm_epsilon]))
+        self.register_buffer("dim", torch.FloatTensor([config.encoder_dim]))
+        # self.momentum = config.batch_norm_momentum
+        # self.epsilon = config.batch_norm_epsilon
+        # self.dim = config.encoder_dim
+    
+#     def forward(self, inputs, input_paddings):
+#         #inputs: NDH
+#         #padding: NH
+#         mask = 1-input_paddings[:,None,:]
 #         if self.training:
-#             # with torch.no_grad():
-#                 # mean = inputs[input_paddings==0].mean(dim=0)
-#                 # var = inputs[input_paddings==0].var(dim=0)
 #             count = mask.sum()
-#             mean = (inputs*mask).sum(dim=(0,1))/count
-#             var = torch.square(inputs*mask).sum(dim=(0,1))/count-torch.square(mean)
-#             self.running_mean = self.momentum*self.running_mean + (1-self.momentum)*mean.detach()
-#             self.running_var = self.momentum*self.running_var + (1-self.momentum)*var.detach()
+#             mean = (inputs*mask).sum(dim=(0,2))/count
+#             var = torch.square(inputs*mask).sum(dim=(0,2))/count-torch.square(mean)
+#             self.running_mean = self.momentum*self.running_mean + (1-self.momentum)*mean.view(-1).detach()
+#             self.running_var = self.momentum*self.running_var + (1-self.momentum)*var.view(-1).detach()
 #         else:
 #             mean = self.running_mean
 #             var = self.running_var 
         
-#         bn = (inputs-mean)*(1+self.weight)*torch.rsqrt(var+self.epsilon)+self.bias
+#         bn = (inputs-mean[None,:,None])*(1+self.weight[None,:,None])*torch.rsqrt(var[None,:,None]+self.epsilon)+self.bias[None,:,None]
 #         output = bn*mask
 #         return output
+
+    def forward(self, inputs, input_paddings):
+        #inputs: NHD
+        #padding: NH
+        mask = 1-input_paddings[:,:,None]
+        if self.training:
+            count = mask.sum()
+            masked_inp = inputs*mask
+            mean = (masked_inp).sum(dim=(0,1))/count
+            std = ((masked_inp-mean)).norm(dim=(0,1))
+            
+            # self.running_mean = self.momentum*self.running_mean + (1-self.momentum)*mean.detach()
+            # self.running_var = self.momentum*self.running_var + (1-self.momentum)*var.detach()
+        else:
+            mean = self.running_mean
+            var = self.running_var 
+        v = (1+self.weight)/(std+self.epsilon)
+        bn = (inputs-mean)*v+self.bias
+        output = bn*mask
+        return output
 
 
 class ConvolutionBlock(nn.Module):
@@ -620,10 +640,10 @@ class ConvolutionBlock(nn.Module):
 
         self.config = config
         self.ln = LayerNorm(dim=config.encoder_dim)
-        self.lin1 = nn.Linear(in_features=config.encoder_dim,
-                              out_features=config.encoder_dim)
-        self.lin2 = nn.Linear(in_features=config.encoder_dim,
-                              out_features=config.encoder_dim)
+        self.lin = nn.Linear(in_features=config.encoder_dim,
+                              out_features=2*config.encoder_dim)
+        # self.lin2 = nn.Linear(in_features=config.encoder_dim,
+        #                       out_features=config.encoder_dim)
 
         self.conv1 = nn.Conv1d(in_channels=config.encoder_dim,
                                out_channels=config.encoder_dim,
@@ -632,17 +652,15 @@ class ConvolutionBlock(nn.Module):
                                padding='same',
                                bias=False,
                                groups=config.encoder_dim)
-        self.bn = BatchNorm(config)
+        self.bn = (BatchNorm(config))
         self.lin3 = nn.Linear(config.encoder_dim, config.encoder_dim)
         self.dropout = nn.Dropout(p=config.conv_residual_dropout_rate)
 
     def forward(self, inputs, input_paddings):
         inputs = self.ln(inputs)
 
-        input_gated1 = self.lin1(inputs)
-        input_gated2 = self.lin2(inputs)
-
-        inputs = input_gated1 * torch.sigmoid(input_gated2)
+        input_gated = self.lin(inputs)
+        inputs = F.glu(input_gated)
         inputs = inputs * (1 - input_paddings[:, :, None])
 
         inputs = inputs.permute(0, 2, 1)
@@ -650,6 +668,7 @@ class ConvolutionBlock(nn.Module):
         inputs = inputs.permute(0, 2, 1)
 
         inputs = self.bn(inputs, input_paddings)
+
         inputs = F.silu(inputs)
         inputs = self.lin3(inputs)
 
@@ -736,3 +755,10 @@ class ConformerEncoderDecoder(nn.Module):
         outputs = self.ln(outputs)
         outputs = self.lin(outputs)
         return outputs, output_paddings
+
+if __name__=="__main__":
+    L = 320000
+    m = ConformerEncoderDecoder(ConformerConfig())
+    wav = torch.randn(size=(2, L))
+    pad = torch.zeros_like(wav)
+    _ = m(wav, pad)

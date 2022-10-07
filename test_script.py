@@ -42,7 +42,7 @@ RANK = rank
 if USE_PYTORCH_DDP:
     if train:
         sampler = torch.utils.data.distributed.DistributedSampler(
-        ds, num_replicas=N_GPUS, rank=RANK, shuffle=True, seed=1)
+        ds, num_replicas=N_GPUS, rank=RANK, shuffle=True, seed=0)
     else:
         sampler = data_utils.DistributedEvalSampler(
         ds, num_replicas=N_GPUS, rank=RANK, shuffle=False)
@@ -61,6 +61,8 @@ def train_step(inp, pad, targets, target_paddings):
     # pad = torch.zeros_like(pad)
     # print(inp.device)
     logits, logit_paddings = m(inp.to(device), pad.to(device))
+    if rank==0:
+        print(f"Memory allocated after fwd: ",torch.cuda.memory_allocated()/1024**3,"GB")
     # logit_paddings = torch.zeros_like(logit_paddings)
     # targets = torch.randint(low=0, high=1024, size=(logits.shape[0],256))
     # target_paddings = torch.zeros_like(targets)
@@ -87,3 +89,5 @@ for i, batch in enumerate(dataloader):
     loss = train_step(batch[0][0],batch[0][1],batch[1][0],batch[1][1])
     if rank==0:
         print(f"{loss}")
+    torch.cuda.empty_cache()
+    # exit()
