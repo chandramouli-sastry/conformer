@@ -82,7 +82,10 @@ class Subsample(nn.Module):
                                        output_channels=encoder_dim,
                                        unfold_logic=False)
 
-        self.linear = nn.LazyLinear(out_features=self.encoder_dim, bias=True)
+        # self.linear = nn.LazyLinear(out_features=self.encoder_dim, bias=True)
+        self.w = nn.Parameter(
+            torch.nn.init.xavier_uniform_(torch.empty(encoder_dim,20,encoder_dim)))
+        self.bias = nn.Parameter(torch.zeros(encoder_dim))
         self.pos_encode = AddPositionalEmbedding(
             embedding_dim=self.encoder_dim)
         self.dropout = nn.Dropout(p=self.input_dropout_rate)
@@ -93,13 +96,14 @@ class Subsample(nn.Module):
 
         outputs, output_paddings = self.conv1(outputs, output_paddings)
         outputs, output_paddings = self.conv2(outputs, output_paddings)
-
+        
         batch_size, channels, subsampled_lengths, subsampled_dims = outputs.shape
-        outputs = outputs.permute(0, 2, 3,
-                                  1).reshape(batch_size, subsampled_lengths,
-                                             subsampled_dims * channels)
+        outputs = torch.einsum("ncld,cdo->nlo",outputs, self.w)+self.bias
+        # outputs = outputs.permute(0, 2, 3,
+        #                           1).reshape(batch_size, subsampled_lengths,
+        #                                      subsampled_dims * channels)
 
-        outputs = self.linear(outputs)
+        # outputs = self.linear(outputs)
         outputs = outputs + self.pos_encode(seq_length=outputs.shape[1])
         outputs = self.dropout(outputs)
 
@@ -560,7 +564,6 @@ class CustomBatchNorm1d(nn.BatchNorm1d):
 
 
 class BatchNorm(nn.Module):
-
     def __init__(self, config: ConformerConfig):
         super().__init__()
         self.bn = CustomBatchNorm1d(config)
@@ -568,11 +571,46 @@ class BatchNorm(nn.Module):
     def forward(self, inputs, input_paddings):
         #inputs: NHD
         #padding: NH
-        bn_inp = self.bn(inputs[input_paddings == 0])
+        bn_inp = self.bn(inputs[input_paddings >= 0])
         output = torch.zeros_like(inputs)
-        output[input_paddings == 0] = bn_inp
+        output[input_paddings >= 0] = bn_inp
 
         return output
+
+# class BatchNorm(nn.Module):
+#     def __init__(self, config: ConformerConfig):
+#         super().__init__()
+#         # self.bn = CustomBatchNorm1d(config)
+#         running_mean = torch.zeros(config.encoder_dim)
+#         running_var = torch.zeros(config.encoder_dim)
+#         self.register_buffer("running_mean", running_mean)
+#         self.register_buffer("running_var",running_var)
+#         self.weight = nn.Parameter(torch.zeros(config.encoder_dim))
+#         self.bias = nn.Parameter(torch.zeros(config.encoder_dim))
+#         self.momentum = config.batch_norm_momentum
+#         self.epsilon = config.batch_norm_epsilon
+#         self.dim = config.encoder_dim
+    
+#     def forward(self, inputs, input_paddings):
+#         #inputs: NHD
+#         #padding: NH
+#         mask = 1-input_paddings[:,:,None]
+#         if self.training:
+#             # with torch.no_grad():
+#                 # mean = inputs[input_paddings==0].mean(dim=0)
+#                 # var = inputs[input_paddings==0].var(dim=0)
+#             count = mask.sum()
+#             mean = (inputs*mask).sum(dim=(0,1))/count
+#             var = torch.square(inputs*mask).sum(dim=(0,1))/count-torch.square(mean)
+#             self.running_mean = self.momentum*self.running_mean + (1-self.momentum)*mean.detach()
+#             self.running_var = self.momentum*self.running_var + (1-self.momentum)*var.detach()
+#         else:
+#             mean = self.running_mean
+#             var = self.running_var 
+        
+#         bn = (inputs-mean)*(1+self.weight)*torch.rsqrt(var+self.epsilon)+self.bias
+#         output = bn*mask
+#         return output
 
 
 class ConvolutionBlock(nn.Module):
@@ -687,23 +725,14 @@ class ConformerEncoderDecoder(nn.Module):
         outputs = inputs
         output_paddings = input_paddings
         outputs, output_paddings = self.preprocessor(outputs, output_paddings)
-        # print(outputs.shape)
-        # if self.training:
-        #   outputs, output_paddings = self.specaug(outputs, output_paddings)
-        # print(outputs.shape)
-        # print(torch.cuda.memory_allocated()/1024**3)
-        # with torch.amp.autocast(device_type="cuda"):
+        if self.training:
+          outputs, output_paddings = self.specaug(outputs, output_paddings)
+        
         outputs, output_paddings = self.subsample(outputs, output_paddings)
-        # print(outputs.shape)
-        # outputs = outputs.float32()
-        # output_paddings = output_paddings.float32()
-        # print(torch.cuda.memory_allocated()/1024**3)
+        
         for conformer in self.conformers:
             outputs = conformer(outputs, output_paddings)
-            # print(outputs.shape)
+        
         outputs = self.ln(outputs)
         outputs = self.lin(outputs)
-        # print(outputs.shape)
-        # print(torch.cuda.memory_allocated()/1024**3)
-        # exit()
         return outputs, output_paddings
