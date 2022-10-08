@@ -89,5 +89,6 @@ for i, batch in enumerate(dataloader):
     loss = train_step(batch[0][0],batch[0][1],batch[1][0],batch[1][1])
     if rank==0:
         print(f"{loss}")
-    torch.cuda.empty_cache()
+    # if i==1:
+    # torch.cuda.empty_cache()
     # exit()

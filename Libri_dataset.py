@@ -39,10 +39,10 @@ class LibriDataset(torch.utils.data.Dataset):
             target_paddings, (0, 256 - target_paddings.shape[0]),
             constant_values=1.0)
         targets = np.pad(targets, (0, 256 - targets.shape[0]), constant_values=0)
-        audio = audio.astype(np.int32)
-        audio_paddings = audio_paddings.astype(np.int32)
-        targets = targets.astype(np.int32)
-        target_paddings = target_paddings.astype(np.int32)
+        audio = audio.astype(np.float32)
+        audio_paddings = audio_paddings.astype(np.float32)
+        targets = targets.astype(np.float32)
+        target_paddings = target_paddings.astype(np.float32)
         return (audio, audio_paddings), (targets, target_paddings)
         return {
             "inputs": (audio, audio_paddings),
